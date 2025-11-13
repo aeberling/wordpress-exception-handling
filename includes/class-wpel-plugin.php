@@ -1,0 +1,173 @@
+<?php
+if (!defined('ABSPATH')) { exit; }
+
+class WPEL_Plugin {
+  private static $instance = null;
+
+  private $prev_error_handler = null;
+  private $prev_exception_handler = null;
+
+  public static function instance(): self {
+    if (self::$instance === null) {
+      self::$instance = new self();
+      self::$instance->init();
+    }
+    return self::$instance;
+  }
+
+  public function init() {
+    // Admin pages & settings
+    add_action('admin_menu', array('WPEL_Admin', 'add_menus'));
+    add_action('admin_init', array('WPEL_Settings', 'register'));
+
+    // Retention cron
+    add_action('wpel_purge_old_logs', array(WPEL_Logger::instance(), 'purge_old_logs'));
+
+    // Capture hooks based on settings
+    add_action('plugins_loaded', array($this, 'maybe_setup_captures'));
+  }
+
+  public function maybe_setup_captures() {
+    $settings = get_option('wpel_settings', array());
+
+    if (!empty($settings['capture_php_errors'])) {
+      $this->prev_error_handler = set_error_handler(array($this, 'capture_php_error'));
+    }
+
+    if (!empty($settings['capture_php_exceptions'])) {
+      $this->prev_exception_handler = set_exception_handler(array($this, 'capture_exception'));
+    }
+
+    if (!empty($settings['capture_shutdown_fatal'])) {
+      register_shutdown_function(array($this, 'capture_shutdown'));
+    }
+
+    if (!empty($settings['capture_http_api_failures'])) {
+      add_action('http_api_debug', array($this, 'capture_http_api_debug'), 10, 5);
+    }
+
+    if (!empty($settings['capture_wp_errors'])) {
+      add_action('wp_error_added', array($this, 'capture_wp_error_added'), 10, 4);
+    }
+
+    if (!empty($settings['capture_cron_failures'])) {
+      add_action('wp_cron_failed', array($this, 'capture_cron_failed'));
+    }
+  }
+
+  public function capture_php_error($errno, $errstr, $errfile, $errline) {
+    // Respect error_reporting
+    if (!(error_reporting() & $errno)) {
+      return false; // pass-through
+    }
+
+    $type = 'warning';
+    switch ($errno) {
+      case E_ERROR:
+      case E_USER_ERROR:
+      case E_RECOVERABLE_ERROR:
+        $type = 'error'; break;
+      case E_WARNING:
+      case E_USER_WARNING:
+      case E_COMPILE_WARNING:
+      case E_CORE_WARNING:
+      case E_STRICT:
+        $type = 'warning'; break;
+      case E_NOTICE:
+      case E_USER_NOTICE:
+      case E_DEPRECATED:
+      case E_USER_DEPRECATED:
+        $type = 'info'; break;
+      default:
+        $type = 'info'; break;
+    }
+
+    wpel_log($type, $errstr, array(
+      'file' => $errfile,
+      'line' => $errline,
+      'errno' => $errno,
+    ));
+
+    // Let default handler continue
+    if (is_callable($this->prev_error_handler)) {
+      return call_user_func($this->prev_error_handler, $errno, $errstr, $errfile, $errline);
+    }
+    return false;
+  }
+
+  public function capture_exception($exception) {
+    wpel_log_error('Uncaught Exception: ' . $exception->getMessage(), array(
+      'file' => $exception->getFile(),
+      'line' => $exception->getLine(),
+      'code' => $exception->getCode(),
+      'trace' => wp_debug_backtrace_summary(null, 20),
+    ));
+
+    if (is_callable($this->prev_exception_handler)) {
+      call_user_func($this->prev_exception_handler, $exception);
+    }
+  }
+
+  public function capture_shutdown() {
+    $error = error_get_last();
+    if ($error && in_array($error['type'], array(E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR), true)) {
+      wpel_log_error('Fatal Error on shutdown', array(
+        'message' => $error['message'],
+        'file' => $error['file'],
+        'line' => $error['line'],
+        'type' => $error['type'],
+      ));
+    }
+  }
+
+  public function capture_http_api_debug($response, $type, $class, $args, $url) {
+    if ($type !== 'response') return;
+
+    if (is_wp_error($response)) {
+      wpel_log_error('HTTP API request failed', array(
+        'url' => $url,
+        'args' => $args,
+        'error' => array(
+          'code' => $response->get_error_code(),
+          'message' => $response->get_error_message(),
+          'data' => $response->get_error_data(),
+        ),
+      ));
+      return;
+    }
+
+    $code = wp_remote_retrieve_response_code($response);
+    if ($code >= 400) {
+      wpel_log_warning('HTTP API non-2xx response', array(
+        'url' => $url,
+        'status' => $code,
+        'response' => array(
+          'headers' => wp_remote_retrieve_headers($response),
+          'body_excerpt' => substr((string)wp_remote_retrieve_body($response), 0, 512),
+        ),
+      ));
+    }
+  }
+
+  public function capture_wp_error_added($code, $message, $data, $wp_error) {
+    // This can be noisy; keep as info unless code suggests error.
+    $type = stripos((string)$code, 'error') !== false ? 'error' : 'info';
+    wpel_log($type, 'WP_Error added: ' . $message, array(
+      'code' => $code,
+      'data' => $data,
+    ));
+  }
+
+  public function capture_cron_failed($result = null) {
+    // $result is WP_Error
+    if (is_wp_error($result)) {
+      wpel_log_error('WP-Cron spawn failed', array(
+        'code' => $result->get_error_code(),
+        'message' => $result->get_error_message(),
+        'data' => $result->get_error_data(),
+      ));
+    } else {
+      wpel_log_error('WP-Cron spawn failed (unknown error)', array());
+    }
+  }
+}
