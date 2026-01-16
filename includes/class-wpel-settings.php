@@ -24,6 +24,20 @@ class WPEL_Settings {
       'step' => 1,
     ));
 
+    add_settings_field('dedup_period', __('Deduplication Period', 'wpel'), array(__CLASS__, 'field_select'), 'wpel_settings', 'wpel_main', array(
+      'key' => 'dedup_period',
+      'label' => __('Prevent duplicate logs/notifications for the same error within this time period.', 'wpel'),
+      'choices' => array(
+        '0' => __('Disabled (log every occurrence)', 'wpel'),
+        '1' => __('1 Hour', 'wpel'),
+        '6' => __('6 Hours', 'wpel'),
+        '12' => __('12 Hours', 'wpel'),
+        '24' => __('24 Hours (1 Day)', 'wpel'),
+        '48' => __('48 Hours (2 Days)', 'wpel'),
+        '168' => __('1 Week', 'wpel'),
+      ),
+    ));
+
     add_settings_field('notify_types', __('Notify on Types', 'wpel'), array(__CLASS__, 'field_checklist'), 'wpel_settings', 'wpel_main', array(
       'key' => 'notify_types',
       'choices' => array('error' => 'Error', 'warning' => 'Warning', 'info' => 'Info', 'success' => 'Success'),
@@ -72,6 +86,7 @@ class WPEL_Settings {
     $out = array();
     $out['enable_file_logging'] = !empty($input['enable_file_logging']);
     $out['retention_days'] = isset($input['retention_days']) ? max(1, (int)$input['retention_days']) : 30;
+    $out['dedup_period'] = isset($input['dedup_period']) ? max(0, (int)$input['dedup_period']) : 24;
 
     $choices = array('error','warning','info','success');
     $out['notify_types'] = array_values(array_intersect($choices, isset($input['notify_types']) && is_array($input['notify_types']) ? array_map('strval', $input['notify_types']) : array()));
@@ -121,6 +136,23 @@ class WPEL_Settings {
     foreach ($args['choices'] as $value => $label) {
       $checked = in_array($value, $selected, true) ? 'checked' : '';
       echo '<label style="display:inline-block;margin-right:12px;"><input type="checkbox" name="wpel_settings[' . esc_attr($key) . '][]" value="' . esc_attr($value) . '" ' . $checked . '> ' . esc_html($label) . '</label>';
+    }
+  }
+
+  public static function field_select($args) {
+    $settings = get_option('wpel_settings', array());
+    $key = $args['key'];
+    $val = isset($settings[$key]) ? (string)$settings[$key] : '24';
+    $label = isset($args['label']) ? $args['label'] : '';
+
+    echo '<select name="wpel_settings[' . esc_attr($key) . ']">';
+    foreach ($args['choices'] as $value => $text) {
+      $selected = ($val === (string)$value) ? 'selected' : '';
+      echo '<option value="' . esc_attr($value) . '" ' . $selected . '>' . esc_html($text) . '</option>';
+    }
+    echo '</select>';
+    if ($label) {
+      echo '<p class="description">' . esc_html($label) . '</p>';
     }
   }
 }

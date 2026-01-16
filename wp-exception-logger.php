@@ -51,6 +51,7 @@ function wpel_activate() {
   $defaults = array(
     'enable_file_logging' => false,
     'retention_days' => 30,
+    'dedup_period' => 24,
     'notify_slack_webhook_url' => '',
     'notify_webhook_url' => '',
     'notify_email' => '',
@@ -78,6 +79,12 @@ function wpel_deactivate() {
   if ($timestamp) {
     wp_unschedule_event($timestamp, 'wpel_purge_old_logs');
   }
+
+  // Unschedule Global JSON Checker cron
+  $json_checker_timestamp = wp_next_scheduled('wpel_check_global_json');
+  if ($json_checker_timestamp) {
+    wp_unschedule_event($json_checker_timestamp, 'wpel_check_global_json');
+  }
 }
 register_deactivation_hook(__FILE__, 'wpel_deactivate');
 
@@ -91,16 +98,23 @@ require_once WPEL_PLUGIN_DIR . 'includes/class-wpel-logger.php';
 require_once WPEL_PLUGIN_DIR . 'includes/class-wpel-settings.php';
 require_once WPEL_PLUGIN_DIR . 'includes/class-wpel-admin.php';
 require_once WPEL_PLUGIN_DIR . 'includes/class-wpel-plugin.php';
+require_once WPEL_PLUGIN_DIR . 'includes/class-wpel-global-json-checker.php';
+require_once WPEL_PLUGIN_DIR . 'includes/class-wpel-documentation.php';
 
 // Bootstrap
 WPEL_Plugin::instance();
+
+// Initialize Global JSON Checker
+add_action('init', function() {
+    WPEL_Global_JSON_Checker::instance()->init();
+});
 
 
 /**
  * Enqueue admin CSS for WPEL pages.
  */
 function wpel_enqueue_admin_assets($hook) {
-  // Only load on plugin pages (optional: adjust if your page slug changes)
+  // Only load on plugin pages
   if (strpos($hook, 'wpel') === false) {
       return;
   }
@@ -111,5 +125,8 @@ function wpel_enqueue_admin_assets($hook) {
       array(),
       WPEL_VERSION
   );
+
+  // Add dashicons for documentation page
+  wp_enqueue_style('dashicons');
 }
 add_action('admin_enqueue_scripts', 'wpel_enqueue_admin_assets');

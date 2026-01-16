@@ -21,6 +21,24 @@ class WPEL_Admin {
       'wpel-settings',
       array(__CLASS__, 'render_settings_page')
     );
+
+    add_submenu_page(
+      'wpel-logs',
+      __('Global JSON Checker', 'wpel'),
+      __('JSON Checker', 'wpel'),
+      'manage_options',
+      'wpel-json-checker',
+      array(__CLASS__, 'render_json_checker_page')
+    );
+
+    add_submenu_page(
+      'wpel-logs',
+      __('Documentation', 'wpel'),
+      __('Documentation', 'wpel'),
+      'manage_options',
+      'wpel-docs',
+      array('WPEL_Documentation', 'render_page')
+    );
   }
 
   public static function render_settings_page() {
@@ -168,6 +186,140 @@ class WPEL_Admin {
     }
 
     // Basic badge styles
+    echo '<style>
+    .wpel-badge{display:inline-block;padding:2px 8px;border-radius:4px;color:#fff;font-size:12px;}
+    .wpel-error{background:#cc0000;}
+    .wpel-warning{background:#d97706;}
+    .wpel-info{background:#2563eb;}
+    .wpel-success{background:#059669;}
+    </style>';
+
+    echo '</div>';
+  }
+
+  public static function render_json_checker_page() {
+    if (!current_user_can('manage_options')) {
+      wp_die(__('You do not have permission to access this page.', 'wpel'));
+    }
+
+    $results = null;
+    $action_message = '';
+
+    // Handle manual check action
+    if (!empty($_POST['wpel_check_json']) && check_admin_referer('wpel_check_json_action', 'wpel_check_json_nonce')) {
+      $checker = WPEL_Global_JSON_Checker::instance();
+      $results = $checker->check_all_global_json_files();
+      $action_message = sprintf(
+        __('Check completed: %d files checked, %d valid, %d invalid, %d repaired, %d failed.', 'wpel'),
+        $results['checked'],
+        $results['valid'],
+        $results['invalid'],
+        $results['repaired'],
+        $results['failed']
+      );
+    }
+
+    $checker = WPEL_Global_JSON_Checker::instance();
+    $file_map = $checker->get_file_handle_map();
+    $cache_path = $checker->get_global_cache_path();
+
+    echo '<div class="wrap">';
+    echo '<h1>' . esc_html__('Global JSON File Checker', 'wpel') . '</h1>';
+
+    if ($action_message) {
+      $class = ($results && $results['failed'] > 0) ? 'notice-warning' : 'notice-success';
+      echo '<div class="notice ' . $class . ' is-dismissible"><p>' . esc_html($action_message) . '</p></div>';
+    }
+
+    echo '<p>' . esc_html__('This tool checks global JSON cache files for validity and automatically repairs them from the Statamic API if they are corrupted.', 'wpel') . '</p>';
+    echo '<p><strong>' . esc_html__('Cache Path:', 'wpel') . '</strong> <code>' . esc_html($cache_path) . '</code></p>';
+
+    // Manual check form
+    echo '<form method="post" style="margin-bottom: 20px;">';
+    wp_nonce_field('wpel_check_json_action', 'wpel_check_json_nonce');
+    submit_button(__('Check & Repair JSON Files Now', 'wpel'), 'primary', 'wpel_check_json', false);
+    echo '</form>';
+
+    // Show file status table
+    echo '<h2>' . esc_html__('Global JSON Files', 'wpel') . '</h2>';
+    echo '<table class="widefat striped">';
+    echo '<thead><tr>';
+    echo '<th>' . esc_html__('File', 'wpel') . '</th>';
+    echo '<th>' . esc_html__('Statamic Handle', 'wpel') . '</th>';
+    echo '<th>' . esc_html__('Status', 'wpel') . '</th>';
+    echo '<th>' . esc_html__('Size', 'wpel') . '</th>';
+    echo '<th>' . esc_html__('Last Modified', 'wpel') . '</th>';
+    echo '</tr></thead><tbody>';
+
+    foreach ($file_map as $filename => $handle) {
+      $file_path = $cache_path . '/' . $filename;
+      $exists = file_exists($file_path);
+      $size = $exists ? size_format(filesize($file_path)) : '-';
+      $modified = $exists ? date('Y-m-d H:i:s', filemtime($file_path)) : '-';
+
+      // Check JSON validity
+      $valid = false;
+      $error = '';
+      if ($exists) {
+        $content = @file_get_contents($file_path);
+        if ($content !== false && !empty(trim($content))) {
+          json_decode($content);
+          $valid = (json_last_error() === JSON_ERROR_NONE);
+          if (!$valid) {
+            $error = json_last_error_msg();
+          }
+        } else {
+          $error = $exists ? 'Empty file' : 'File not found';
+        }
+      } else {
+        $error = 'File not found';
+      }
+
+      $status_class = $valid ? 'wpel-success' : 'wpel-error';
+      $status_text = $valid ? __('Valid', 'wpel') : __('Invalid', 'wpel');
+
+      // Add result info if we just ran a check
+      if ($results && isset($results['details'][$filename])) {
+        $detail = $results['details'][$filename];
+        if (!$detail['valid'] && $detail['repaired']) {
+          $status_class = 'wpel-warning';
+          $status_text = __('Repaired', 'wpel');
+        } elseif (!$detail['valid'] && !$detail['repaired']) {
+          $status_text = __('Failed', 'wpel') . ' - ' . esc_html($detail['repair_error']);
+        }
+      }
+
+      echo '<tr>';
+      echo '<td><code>' . esc_html($filename) . '</code></td>';
+      echo '<td><code>' . esc_html($handle) . '</code></td>';
+      echo '<td><span class="wpel-badge ' . esc_attr($status_class) . '">' . esc_html($status_text) . '</span>';
+      if ($error && !$valid) {
+        echo '<br><small style="color:#666;">' . esc_html($error) . '</small>';
+      }
+      echo '</td>';
+      echo '<td>' . esc_html($size) . '</td>';
+      echo '<td>' . esc_html($modified) . '</td>';
+      echo '</tr>';
+    }
+
+    echo '</tbody></table>';
+
+    // Cron status
+    $next_scheduled = wp_next_scheduled('wpel_check_global_json');
+    echo '<h2>' . esc_html__('Scheduled Check', 'wpel') . '</h2>';
+    echo '<p>';
+    if ($next_scheduled) {
+      echo sprintf(
+        __('Next scheduled check: %s (in %s)', 'wpel'),
+        date('Y-m-d H:i:s', $next_scheduled),
+        human_time_diff(time(), $next_scheduled)
+      );
+    } else {
+      echo esc_html__('No scheduled check found. The cron job will be registered on next page load.', 'wpel');
+    }
+    echo '</p>';
+
+    // Styles
     echo '<style>
     .wpel-badge{display:inline-block;padding:2px 8px;border-radius:4px;color:#fff;font-size:12px;}
     .wpel-error{background:#cc0000;}
